@@ -15,7 +15,7 @@ export function load({ runtime, options, config }) {
     runtime.liquid = (name, data) => engine.renderFile(name, data)
 }
 
-export function render({ entity, options, runtime }) {
+export async function render({ entity, options, runtime }) {
     // Expose every function on runtime as a Liquid filter,
     // so render-helper plugins (markdown, href, ...) keep working without per-plugin glue.
     for (let key in runtime) {
@@ -24,5 +24,14 @@ export function render({ entity, options, runtime }) {
         }
     }
     const name = path.relative(options.layoutsFolder, entity.layout.uri).replace(/\.liquid$/, '')
-    return runtime.liquid(name, runtime)
+    try {
+        return await runtime.liquid(name, runtime)
+    } catch (err) {
+        // LiquidJS RenderError/ParseError carry a `token` with file/line/col.
+        const token = err?.token
+        err.layoutUri ??= token?.file || entity.layout.uri
+        if (token?.line && err.line == null) err.line = token.line
+        if (token?.col && err.column == null) err.column = token.col
+        throw err
+    }
 }
