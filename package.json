@@ -1,0 +1,24 @@
+{
+  "name": "mikser-io-render-liquid",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/almero-digital-marketing/mikser-io-render-liquid.git"
+  },
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/almero-digital-marketing/mikser-io-render-liquid/issues"
+  },
+  "homepage": "https://github.com/almero-digital-marketing/mikser-io-render-liquid#readme",
+  "peerDependencies": {
+    "mikser-io": "^6.0.0"
+  },
+  "dependencies": {
+    "liquidjs": "^10.16.0"
+  }
+}
