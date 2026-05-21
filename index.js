@@ -23,7 +23,13 @@ export async function render({ entity, options, runtime }) {
             engine.registerFilter(key, (input, ...args) => runtime[key](input, ...args))
         }
     }
-    const name = path.relative(options.layoutsFolder, entity.layout.uri).replace(/\.liquid$/, '')
+    // Keep the `.liquid` in the name. LiquidJS's renderFile resolution
+    // skips its own `extname` append for names that already have a
+    // file-ish extension — and `path.extname('foo.html-pdf')` is
+    // `.html-pdf`, which Liquid treats as "extension already present".
+    // Stripping would make multi-segment layout names (e.g.
+    // `franchises.html-pdf.liquid`) fail with ENOENT.
+    const name = path.relative(options.layoutsFolder, entity.layout.uri)
     try {
         return await runtime.liquid(name, runtime)
     } catch (err) {
