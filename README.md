@@ -2,6 +2,8 @@
 
 [LiquidJS](https://www.npmjs.com/package/liquidjs) renderer for [Mikser](https://github.com/almero-digital-marketing/mikser-io). Renders entities whose layout uses the `.liquid` template engine.
 
+Mikser doesn't pick your template engine for you — install the renderer that matches the syntax your team already knows. Liquid is the templating syntax behind Shopify, Jekyll, and Eleventy — designer-friendly, safe by default, deeply familiar to anyone who has touched a Jekyll site. Mix freely with other engines in the same project (`.liquid`, `.hbs`, `.eta` can all coexist).
+
 ## Install
 
 ```bash
