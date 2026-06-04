@@ -19,6 +19,6 @@
     "mikser-io": "^7.0.0"
   },
   "dependencies": {
-    "liquidjs": "^10.16.0"
+    "liquidjs": "^10.27.0"
   }
 }
