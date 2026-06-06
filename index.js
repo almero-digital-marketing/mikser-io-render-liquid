@@ -1,10 +1,15 @@
 import { Liquid } from 'liquidjs'
-import path from 'node:path'
 
 let engine
 
 export function load({ runtime, options, config }) {
     if (!engine) {
+        // `root` still points at the layouts folder so LiquidJS's own
+        // `{% include 'partial' %}` / `{% layout 'wrapper' %}`
+        // directives can resolve from disk. The top-level layout body
+        // is rendered from `entity.layout.content` (populated by the
+        // layouts plugin and stripped of YAML by front-matter) —
+        // single source of truth for layout bodies.
         engine = new Liquid({
             root: options.layoutsFolder,
             extname: '.liquid',
@@ -12,10 +17,10 @@ export function load({ runtime, options, config }) {
             ...config,
         })
     }
-    runtime.liquid = (name, data) => engine.renderFile(name, data)
+    runtime.liquid = (source, data) => engine.parseAndRender(source, data)
 }
 
-export async function render({ entity, options, runtime }) {
+export async function render({ entity, runtime }) {
     // Expose every function on runtime as a Liquid filter,
     // so render-helper plugins (markdown, href, ...) keep working without per-plugin glue.
     for (let key in runtime) {
@@ -23,15 +28,9 @@ export async function render({ entity, options, runtime }) {
             engine.registerFilter(key, (input, ...args) => runtime[key](input, ...args))
         }
     }
-    // Keep the `.liquid` in the name. LiquidJS's renderFile resolution
-    // skips its own `extname` append for names that already have a
-    // file-ish extension — and `path.extname('foo.html-pdf')` is
-    // `.html-pdf`, which Liquid treats as "extension already present".
-    // Stripping would make multi-segment layout names (e.g.
-    // `franchises.html-pdf.liquid`) fail with ENOENT.
-    const name = path.relative(options.layoutsFolder, entity.layout.uri)
+    const source = entity.layout.content ?? ''
     try {
-        return await runtime.liquid(name, runtime)
+        return await runtime.liquid(source, runtime)
     } catch (err) {
         // LiquidJS RenderError/ParseError carry a `token` with file/line/col.
         const token = err?.token
