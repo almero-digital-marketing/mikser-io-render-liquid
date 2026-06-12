@@ -84,3 +84,8 @@ export async function render({ entity, runtime, state, track }) {
         throw err
     }
 }
+
+// v9 factory — ADR-0010.
+export function renderLiquid(options = {}) {
+    return { name: options.name ?? 'liquid', options, load, render }
+}
