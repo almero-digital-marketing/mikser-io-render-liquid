@@ -14,16 +14,21 @@ npm install mikser-io-render-liquid
 
 ```js
 // mikser.config.js
+import { layouts } from 'mikser-io'
+import { renderLiquid } from 'mikser-io-render-liquid'
+
 export default {
-  renderer: 'liquid',
-  'render-liquid': {
-    jsTruthy: true,
-    strictFilters: false
-  }
+  plugins: [
+    layouts(),
+    renderLiquid({
+      jsTruthy: true,
+      strictFilters: false
+    }),
+  ]
 }
 ```
 
-The `render-liquid` config object is passed through to the `Liquid` constructor — see [LiquidJS options](https://liquidjs.com/api/interfaces/LiquidOptions.html). Defaults applied by the plugin:
+The options object is passed through to the `Liquid` constructor — see [LiquidJS options](https://liquidjs.com/api/interfaces/LiquidOptions.html). Defaults applied by the plugin:
 
 - `root: options.layoutsFolder`
 - `extname: '.liquid'`
