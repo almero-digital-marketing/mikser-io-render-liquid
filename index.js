@@ -35,7 +35,7 @@ export function load({ runtime, options, config }) {
             // That is a bad default HERE specifically, because which
             // filters exist depends on which render plugins are loaded:
             // every function on `runtime` is registered as one below. So
-            // `{{ '/contacts' | href }}` with renderHref() missing from the
+            // `{{ '/contacts' | href }}` with hrefUrlHelpers() missing from the
             // plugin list renders the string back, and a missing plugin is
             // indistinguishable from a working helper.
             //
