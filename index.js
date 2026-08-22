@@ -30,6 +30,20 @@ export function load({ runtime, options, config }) {
             root: options.layoutsFolder,
             extname: '.liquid',
             cache: !options.watch,
+            // LiquidJS defaults strictFilters to false, which makes an
+            // unknown filter a no-op that returns its input unchanged.
+            // That is a bad default HERE specifically, because which
+            // filters exist depends on which render plugins are loaded:
+            // every function on `runtime` is registered as one below. So
+            // `{{ '/contacts' | href }}` with renderHref() missing from the
+            // plugin list renders the string back, and a missing plugin is
+            // indistinguishable from a working helper.
+            //
+            // strictVariables is deliberately NOT set. It would throw on
+            // any undefined variable, which templates legitimately rely on
+            // being empty — a far larger change than this issue is about.
+            strictFilters: true,
+            // Spread last, so a project can put either back.
             ...config,
         })
 
