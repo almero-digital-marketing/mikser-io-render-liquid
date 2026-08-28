@@ -122,19 +122,42 @@ export async function render({ entity, runtime, state, track }) {
 const LIQUID_IDENT_PATH = /([a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*)/
 export function parseReferences(source) {
     if (typeof source !== 'string' || !source) {
-        return { variables: [], partials: [], iterations: [] }
+        return { variables: [], partials: [], iterations: [], assigns: [] }
     }
     const probe = new Liquid({})
     let templates
     try {
         templates = probe.parse(source)
     } catch (err) {
-        return { variables: [], partials: [], iterations: [], parseError: err.message }
+        return { variables: [], partials: [], iterations: [], assigns: [], parseError: err.message }
     }
 
     const variables  = new Set()
-    const partials   = new Set()
+    // Keyed by partial name and MERGED across call sites: `ui/btn` rendered
+    // eight times with different labels is one partial with the union of what
+    // it is ever passed, which is the question a contract answers.
+    const partials   = new Map()
     const iterations = []
+    const assigns    = []
+
+    // The path a tag ARGUMENT refers to, or null if it is a literal.
+    //
+    // Type, not text: LIQUID_IDENT_PATH is unanchored, so run over the source
+    // of `variant: 'secondary'` it happily returns `secondary` — a variable
+    // that does not exist, reported as a dependency. A QuotedToken is a value
+    // the template supplied and depends on nothing.
+    function pathOfToken(token) {
+        const kind = token?.constructor?.name
+        if (kind === 'PropertyAccessToken') return token.getText?.() ?? null
+        // A filtered or otherwise compound argument arrives as a Value, whose
+        // identifier paths the branch walker already knows how to read.
+        if (token?.initial) {
+            const found = new Set()
+            collectValuePaths(token, found)
+            return found.size ? [...found][0] : null
+        }
+        return null
+    }
 
     function extractPath(expr) {
         const m = LIQUID_IDENT_PATH.exec(String(expr ?? '').trim())
@@ -166,7 +189,23 @@ export function parseReferences(source) {
         return null
     }
 
-    function walk(nodes) {
+    // An alias resolved through the scopes in view. Only the first segment can
+    // be one: `c.specs` where `c` is the item of `for c in r.cases` is
+    // `r.cases[].specs`, and the tail is property access on whatever that was.
+    function deref(path, scope) {
+        if (!path) return path
+        const [head, ...rest] = String(path).split('.')
+        const base = scope[head]
+        return base ? [base, ...rest].join('.') : path
+    }
+
+    const record = (path, scope) => {
+        const resolved = deref(path, scope)
+        if (resolved) variables.add(resolved)
+        return resolved
+    }
+
+    function walk(nodes, scope = {}) {
         if (!Array.isArray(nodes)) return
         for (const node of nodes) {
             const kind = node?.constructor?.name
@@ -177,28 +216,74 @@ export function parseReferences(source) {
                     // variable ref.
                     const content = node.token?.content ?? ''
                     const path = extractPath(content)
-                    if (path) variables.add(path)
+                    if (path) record(path, scope)
                     break
                 }
                 case 'IncludeTag':
                 case 'RenderTag':
                 case 'LayoutTag': {
                     const file = getText(node.file)
-                    if (file) partials.add(file)
+                    if (file) {
+                        const entry = partials.get(file) ?? { name: file, args: {}, aliases: [] }
+                        // The arguments a partial is called WITH. Dropping
+                        // these was the hole: `{% render 'ui/btn', label:
+                        // r.more %}` makes this template depend on `r.more`,
+                        // and nothing recorded that — so a contract built from
+                        // one file could not see a key consumed one file down.
+                        for (const [name, token] of Object.entries(node.hash?.hash ?? {})) {
+                            const path = pathOfToken(token)
+                            if (!path) continue
+                            // Resolved HERE, in the scope the call sits in,
+                            // before the partial ever runs — so a partial
+                            // rendered inside a loop reports what the loop
+                            // hands it, not the loop variable's local name.
+                            entry.args[name] = record(path, scope)
+                        }
+                        // `{% render 'x' with item as t %}` — the same binding
+                        // written positionally.
+                        const withPath = node.with ? pathOfToken(node.with.value) : null
+                        if (withPath) {
+                            entry.aliases.push({ from: record(withPath, scope), to: node.with.alias ?? null })
+                        }
+                        partials.set(file, entry)
+                    }
                     // Render/include accept a body in some dialects; walk it.
-                    if (Array.isArray(node.templates)) walk(node.templates)
+                    if (Array.isArray(node.templates)) walk(node.templates, scope)
+                    break
+                }
+                case 'AssignTag': {
+                    // `{% assign hero = data.meta.hero %}` renames a path. A
+                    // contract that reports `hero.tags` names a variable local
+                    // to one file; resolving the alias reports
+                    // `data.meta.hero.tags`, which is what the AUTHOR writes.
+                    const found = new Set()
+                    collectValuePaths(node.value, found)
+                    const raw = [...found][0] ?? null
+                    const from = raw ? record(raw, scope) : null
+                    if (node.key) {
+                        assigns.push({ key: node.key, from })
+                        // Bound for the REST of this template, which is what
+                        // `assign` means — everything after it sees the alias.
+                        if (from) scope[node.key] = from
+                    }
                     break
                 }
                 case 'ForTag': {
                     const collection = getText(node.collection)
+                    // `[]` marks an element rather than the collection itself.
+                    // Without it `for c in r.cases` reports `r.cases.specs`,
+                    // which is not a key anyone can write — the specs are on
+                    // each case, not on the list.
+                    const inner = { ...scope }
                     if (collection) {
                         const item = node.variable ?? '(for)'
                         iterations.push({ item, collection })
                         const path = extractPath(collection)
-                        if (path) variables.add(path)
+                        const resolved = path ? record(path, scope) : null
+                        if (resolved && node.variable) inner[node.variable] = `${resolved}[]`
                     }
-                    if (Array.isArray(node.templates))     walk(node.templates)
-                    if (Array.isArray(node.elseTemplates)) walk(node.elseTemplates)
+                    if (Array.isArray(node.templates))     walk(node.templates, inner)
+                    if (Array.isArray(node.elseTemplates)) walk(node.elseTemplates, inner)
                     break
                 }
                 case 'IfTag':
@@ -210,17 +295,19 @@ export function parseReferences(source) {
                     // string forms that aren't reliably exposed.
                     if (Array.isArray(node.branches)) {
                         for (const branch of node.branches) {
-                            collectValuePaths(branch.value, variables)
-                            if (Array.isArray(branch.templates)) walk(branch.templates)
+                            const found = new Set()
+                            collectValuePaths(branch.value, found)
+                            for (const f of found) record(f, scope)
+                            if (Array.isArray(branch.templates)) walk(branch.templates, scope)
                         }
                     }
-                    if (Array.isArray(node.elseTemplates)) walk(node.elseTemplates)
+                    if (Array.isArray(node.elseTemplates)) walk(node.elseTemplates, scope)
                     break
                 }
                 default: {
                     // Generic walk — many tags expose nested .templates.
-                    if (Array.isArray(node?.templates))     walk(node.templates)
-                    if (Array.isArray(node?.elseTemplates)) walk(node.elseTemplates)
+                    if (Array.isArray(node?.templates))     walk(node.templates, scope)
+                    if (Array.isArray(node?.elseTemplates)) walk(node.elseTemplates, scope)
                     break
                 }
             }
@@ -231,8 +318,9 @@ export function parseReferences(source) {
 
     return {
         variables:  Array.from(variables).sort(),
-        partials:   Array.from(partials).sort(),
+        partials:   Array.from(partials.values()).sort((a, b) => a.name.localeCompare(b.name)),
         iterations,
+        assigns,
     }
 }
 
