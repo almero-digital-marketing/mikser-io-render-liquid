@@ -244,6 +244,45 @@ describe('liquid parseReferences: derived values are not aliases', () => {
         assert.ok(!r.assigns.find(a => a.key === 'hero')?.derived)
     })
 
+    it('KEEPS the alias for a filter that preserves element type', () => {
+        // The other side of the rule. `sort` returns the same elements in a
+        // different order, so a loop over the result still indexes the source —
+        // dropping it would put a real key in `unused` instead.
+        const r = parseReferences(
+            '{% assign rows = data.meta.items | sort %}'
+            + '{% for row in rows %}{{ row.name }}{% endfor %}')
+        assert.ok(r.variables.includes('data.meta.items[].name'),
+            `lost a real key: ${r.variables.join(', ')}`)
+    })
+
+    it('binds an element-yielding filter to one element of the source', () => {
+        const r = parseReferences('{% assign top = data.meta.items | first %}{{ top.name }}')
+        assert.ok(r.variables.includes('data.meta.items[].name'), r.variables.join(', '))
+    })
+
+    it('is only as safe as the least safe link in a chain', () => {
+        // sort preserves, map does not — so the chain is derived.
+        const safe = parseReferences(
+            '{% assign a = data.meta.items | where: "x", 1 | reverse %}'
+            + '{% for i in a %}{{ i.name }}{% endfor %}')
+        assert.ok(safe.variables.includes('data.meta.items[].name'))
+        const unsafe = parseReferences(
+            '{% assign a = data.meta.items | sort | map: "name" %}'
+            + '{% for i in a %}{{ i.name }}{% endfor %}')
+        assert.ok(!unsafe.variables.some(v => v.startsWith('data.meta.items[')),
+            `fabricated through map: ${unsafe.variables.join(', ')}`)
+    })
+
+    it('honours a filter on a FOR collection, which liquidjs drops from the AST', () => {
+        // The filter survives only in the raw tag text, and the quoted pipe in
+        // `split: '|'` must not read as introducing another filter.
+        const derived = parseReferences("{% for t in data.meta.tags | split: '|' %}{{ t.n }}{% endfor %}")
+        assert.ok(!derived.variables.some(v => v.startsWith('data.meta.tags[')),
+            `fabricated: ${derived.variables.join(', ')}`)
+        const kept = parseReferences('{% for t in data.meta.tags | sort %}{{ t.n }}{% endfor %}')
+        assert.ok(kept.variables.includes('data.meta.tags[].n'))
+    })
+
     it('handles the real shape: split, loop, split again', () => {
         // Verbatim from the project that surfaced this.
         const r = parseReferences(

@@ -148,6 +148,46 @@ export function parseReferences(source) {
     // as wrong.
     const FALLBACK_FILTERS = new Set(['default'])
     const hasFallback = (value) => (value?.filters ?? []).some(f => FALLBACK_FILTERS.has(f.name))
+
+    // What a filter does to the SHAPE of a value — the only thing that decides
+    // whether a path may be extended through it.
+    //
+    // Liquid ships 87 filters and nearly all make a NEW value, so "derived" is
+    // the default: once derived, a read says nothing about the source.
+    //
+    // Two exceptions earn their place and the lists are deliberately SHORT.
+    // Wrongly calling a filter shape-preserving INVENTS a required key — the
+    // failure that reads as "your document is broken" about one that is fine.
+    // Wrongly omitting one merely drops a key from the contract, which surfaces
+    // as weak evidence in `unused`. So anything uncertain is left out: `concat`
+    // and `slice` change element type with the operand, and `sample` returns one
+    // item or several depending on its argument.
+    const SHAPE_PRESERVING = new Set([
+        'sort', 'sort_natural', 'reverse', 'uniq', 'compact',
+        'where', 'where_exp', 'reject', 'reject_exp',
+        'push', 'unshift', 'default',
+    ])
+    // Yields ONE element of the collection, so the alias is `source[]`.
+    const ELEMENT_OF = new Set(['first', 'last', 'find', 'find_exp'])
+
+    // Filter names out of raw tag text, for the tags whose parsed form drops
+    // them. Quoted segments come out first: liquid's own `split: '|'` would
+    // otherwise read as a pipe introducing a filter called nothing.
+    const filtersInText = (text) => {
+        const bare = String(text ?? '').replace(/'[^']*'|"[^"]*"/g, "''")
+        return [...bare.matchAll(/\|\s*([a-zA-Z_]\w*)/g)].map(m => m[1])
+    }
+
+    // A chain is only as safe as its least safe link.
+    const shapeAfter = (names) => {
+        let element = false
+        for (const name of names) {
+            if (ELEMENT_OF.has(name)) { element = true; continue }
+            if (SHAPE_PRESERVING.has(name)) continue
+            return 'derived'
+        }
+        return element ? 'element' : 'same'
+    }
     // Keyed by partial name and MERGED across call sites: `ui/btn` rendered
     // eight times with different labels is one partial with the union of what
     // it is ever passed, which is the question a contract answers.
@@ -319,23 +359,20 @@ export function parseReferences(source) {
                     const raw = [...found][0] ?? null
                     const from = raw ? record(raw, scope, guarded) : null
                     if (node.key) {
-                        // `derived` travels with it: the closure walker applies
-                        // these assigns as bindings too, and it has no other way
-                        // to know the value went through a filter.
-                        const derived = !!(node.value?.filters ?? []).length
-                        assigns.push({ key: node.key, from, ...(derived ? { derived } : {}) })
-                        // Bound for the REST of this template, which is what
-                        // `assign` means — everything after it sees the alias.
-                        //
-                        // NOT bound when the value passed through a filter: the
-                        // result is DERIVED, so a read on it says nothing about
-                        // the source. `{% assign rows = c.specs | split: '|' %}`
-                        // turns a string into a list, and binding it would let a
-                        // loop over `rows` report `specs[]` — a key the document
-                        // does not have and cannot be given, since specs is the
-                        // string being split. The source itself is still
-                        // recorded above, which is the true dependency.
-                        if (from && !derived) scope[node.key] = from
+                        // Bound according to what the filters did to the
+                        // shape: unchanged keeps the source path, an
+                        // element-yielding filter binds to `source[]`, and
+                        // anything else is derived and binds nothing. The source
+                        // is recorded above either way — that is the real
+                        // dependency. `derived` travels with the assign because
+                        // the closure walker applies these as bindings too and
+                        // has no other way to know.
+                        const shape = shapeAfter((node.value?.filters ?? []).map(f => f.name))
+                        const derived = shape === 'derived'
+                        const bound = shape === 'element' ? `${from}[]` : from
+                        assigns.push({ key: node.key, from: derived ? from : bound,
+                                       ...(derived ? { derived } : {}) })
+                        if (from && !derived) scope[node.key] = bound
                     }
                     break
                 }
@@ -351,7 +388,15 @@ export function parseReferences(source) {
                         iterations.push({ item, collection })
                         const path = extractPath(collection)
                         const resolved = path ? record(path, scope, guarded) : null
-                        if (resolved && node.variable) inner[node.variable] = `${resolved}[]`
+                        // The collection may be filtered, and liquidjs parses it
+                        // down to a bare path token — the filters survive only in
+                        // the raw tag text. `{% for t in c.tags | split: '|' %}`
+                        // iterates a list made FROM a string, so binding the item
+                        // to `c.tags[]` would invent a member of a string.
+                        const shape = shapeAfter(filtersInText(node.token?.args ?? node.token?.content))
+                        if (resolved && node.variable && shape !== 'derived') {
+                            inner[node.variable] = shape === 'element' ? resolved : `${resolved}[]`
+                        }
                     }
                     if (Array.isArray(node.templates))     walk(node.templates, inner, guarded)
                     if (Array.isArray(node.elseTemplates)) walk(node.elseTemplates, inner, guarded)
