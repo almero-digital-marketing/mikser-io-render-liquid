@@ -114,3 +114,50 @@ describe('liquid parseReferences: shape', () => {
         }
     })
 })
+
+// Aliases nested more than one level deep.
+//
+// A read is only useful as provenance if it names the SOURCE path. Each of
+// these rebinds a value to a new name, twice, and the recorded path has to
+// survive both hops — a contract naming `field.label` describes nothing a
+// document author can act on.
+describe('liquid parseReferences: aliases through nesting', () => {
+    it('follows a loop binding inside a loop', () => {
+        const r = parseReferences(
+            '{% for case in data.meta.results.cases %}'
+            + '{% for spec in case.specs %}{{ spec.name }}{% endfor %}'
+            + '{% endfor %}')
+        assert.ok(r.variables.includes('data.meta.results.cases[].specs[].name'),
+            `got: ${r.variables.join(', ')}`)
+        assert.ok(!r.variables.some(v => v.startsWith('spec.')), 'the local name must not survive')
+    })
+
+    it('follows a loop binding through an assign and back into a loop', () => {
+        const r = parseReferences(
+            '{% assign block = data.meta.enquiry %}'
+            + '{% for field in block.fields %}{{ field.label }}{{ field.type }}{% endfor %}')
+        assert.ok(r.variables.includes('data.meta.enquiry.fields[].label'),
+            `got: ${r.variables.join(', ')}`)
+        assert.ok(r.variables.includes('data.meta.enquiry.fields[].type'))
+    })
+
+    it('resolves a render argument written inside two loops', () => {
+        const r = parseReferences(
+            '{% for group in data.meta.groups %}'
+            + '{% for item in group.items %}'
+            + "{% render 'ui/tag', label: item.title %}"
+            + '{% endfor %}{% endfor %}')
+        const args = r.partials.find(p => p.name === 'ui/tag')?.args ?? {}
+        assert.deepEqual(args, { label: 'data.meta.groups[].items[].title' })
+    })
+
+    it('resolves an argument whose value is itself an alias', () => {
+        const r = parseReferences(
+            '{% assign hero = data.meta.hero %}'
+            + "{% render 'ui/tags', tags: hero.tags, rows: hero.tagRows %}")
+        const args = r.partials.find(p => p.name === 'ui/tags')?.args ?? {}
+        assert.deepEqual(args, { tags: 'data.meta.hero.tags', rows: 'data.meta.hero.tagRows' })
+        assert.ok(r.variables.includes('data.meta.hero.tags'))
+        assert.ok(r.variables.includes('data.meta.hero.tagRows'))
+    })
+})
