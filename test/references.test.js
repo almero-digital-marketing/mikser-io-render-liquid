@@ -195,23 +195,39 @@ describe('liquid parseReferences: default: as a guard', () => {
         assert.deepEqual(r.optional, [])
     })
 
-    it('marks a defaulted PARTIAL ARGUMENT as optional', () => {
+    it('does NOT see a default: on a partial argument, and that is deliberate', () => {
         // liquidjs parses a hash value down to a bare path token and drops the
-        // filter, so this is read from the raw tag text — the only place it
-        // survives.
+        // filter, so the only place it survives is the raw tag text. Reading it
+        // from there worked, and was removed: a regex over tag source is the
+        // kind of engine-shaped machinery that has to track the engine, and it
+        // bought optionality for one filter in one position.
+        //
+        // The cost is honest and small — such a key lands in `missing` instead
+        // of `missingOptional`, both of which are inferred and labelled as such.
         const r = parseReferences(
-            "{% render 'ui/tag', label: data.meta.after | default: 'x', other: data.meta.plain %}")
-        assert.ok(r.optional.includes('data.meta.after'), `optional: ${r.optional.join(', ')}`)
-        assert.ok(!r.optional.includes('data.meta.plain'), 'an undefaulted argument stays required')
+            "{% render 'ui/tag', label: data.meta.after | default: 'x' %}")
+        assert.ok(r.variables.includes('data.meta.after'), 'still recorded as consumed')
+        assert.ok(!r.optional.includes('data.meta.after'))
     })
+})
 
-    it('resolves the defaulted argument through scope, like any other', () => {
-        const r = parseReferences(
-            '{% assign r = data.meta.results %}'
-            + "{% render 'ui/tag', label: r.afterLabel | default: 'x' %}")
-        assert.ok(r.optional.includes('data.meta.results.afterLabel'),
-            `optional: ${r.optional.join(', ')}`)
-    })
+// Aliases nested more than one level deep.
+//
+// A read is only useful as provenance if it names the SOURCE path. Each of
+// these rebinds a value to a new name, twice, and the recorded path has to
+// survive both hops — a contract naming `field.label` describes nothing a
+// document author can act on.
+describe('liquid parseReferences: aliases through nesting', () => {
+})
+
+// A fallback filter is a guard.
+//
+// `{{ hero.title | default: meta.title }}` renders correctly for a document
+// that omits hero.title — the layout was written to work without it, exactly as
+// with `{% if %}`. Calling it required reports a working page as wrong, and
+// `missing` is the one list that must only ever mean "probably wrong".
+describe('liquid parseReferences: default: as a guard', () => {
+
 })
 
 // A filtered value is DERIVED, not an alias.
@@ -244,43 +260,33 @@ describe('liquid parseReferences: derived values are not aliases', () => {
         assert.ok(!r.assigns.find(a => a.key === 'hero')?.derived)
     })
 
-    it('KEEPS the alias for a filter that preserves element type', () => {
-        // The other side of the rule. `sort` returns the same elements in a
-        // different order, so a loop over the result still indexes the source —
-        // dropping it would put a real key in `unused` instead.
+    it('drops paths under ANY filtered value, not just type-changing ones', () => {
+        // Blunt on purpose. Classifying liquid's 87 filters by what they do to a
+        // value's shape was tried and removed: the table has to track the
+        // engine, it is wrong in the direction that INVENTS required keys, and
+        // it exists per engine. `sort` really does preserve element type, and
+        // the key it would recover lands in an advisory list — not worth it.
         const r = parseReferences(
             '{% assign rows = data.meta.items | sort %}'
             + '{% for row in rows %}{{ row.name }}{% endfor %}')
-        assert.ok(r.variables.includes('data.meta.items[].name'),
-            `lost a real key: ${r.variables.join(', ')}`)
+        assert.ok(r.variables.includes('data.meta.items'), 'the dependency itself is still recorded')
+        assert.ok(!r.variables.some(v => v.startsWith('data.meta.items[')),
+            `extended a path through a filter: ${r.variables.join(', ')}`)
     })
 
-    it('binds an element-yielding filter to one element of the source', () => {
-        const r = parseReferences('{% assign top = data.meta.items | first %}{{ top.name }}')
-        assert.ok(r.variables.includes('data.meta.items[].name'), r.variables.join(', '))
+    it('treats a filtered FOR collection the same way', () => {
+        // liquidjs parses the collection down to a bare path token, so the pipe
+        // is looked for in the raw text — with quotes stripped, since liquid's
+        // own `split: '|'` would otherwise read as one.
+        const r = parseReferences("{% for t in data.meta.tags | split: '|' %}{{ t.n }}{% endfor %}")
+        assert.ok(r.variables.includes('data.meta.tags'))
+        assert.ok(!r.variables.some(v => v.startsWith('data.meta.tags[')),
+            `fabricated a member of a string: ${r.variables.join(', ')}`)
     })
 
-    it('is only as safe as the least safe link in a chain', () => {
-        // sort preserves, map does not — so the chain is derived.
-        const safe = parseReferences(
-            '{% assign a = data.meta.items | where: "x", 1 | reverse %}'
-            + '{% for i in a %}{{ i.name }}{% endfor %}')
-        assert.ok(safe.variables.includes('data.meta.items[].name'))
-        const unsafe = parseReferences(
-            '{% assign a = data.meta.items | sort | map: "name" %}'
-            + '{% for i in a %}{{ i.name }}{% endfor %}')
-        assert.ok(!unsafe.variables.some(v => v.startsWith('data.meta.items[')),
-            `fabricated through map: ${unsafe.variables.join(', ')}`)
-    })
-
-    it('honours a filter on a FOR collection, which liquidjs drops from the AST', () => {
-        // The filter survives only in the raw tag text, and the quoted pipe in
-        // `split: '|'` must not read as introducing another filter.
-        const derived = parseReferences("{% for t in data.meta.tags | split: '|' %}{{ t.n }}{% endfor %}")
-        assert.ok(!derived.variables.some(v => v.startsWith('data.meta.tags[')),
-            `fabricated: ${derived.variables.join(', ')}`)
-        const kept = parseReferences('{% for t in data.meta.tags | sort %}{{ t.n }}{% endfor %}')
-        assert.ok(kept.variables.includes('data.meta.tags[].n'))
+    it('leaves an unfiltered collection alone', () => {
+        const r = parseReferences('{% for t in data.meta.tags %}{{ t.n }}{% endfor %}')
+        assert.ok(r.variables.includes('data.meta.tags[].n'))
     })
 
     it('handles the real shape: split, loop, split again', () => {

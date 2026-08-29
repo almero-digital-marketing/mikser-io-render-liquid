@@ -149,51 +149,29 @@ export function parseReferences(source) {
     const FALLBACK_FILTERS = new Set(['default'])
     const hasFallback = (value) => (value?.filters ?? []).some(f => FALLBACK_FILTERS.has(f.name))
 
-    // What a filter does to the SHAPE of a value — the only thing that decides
-    // whether a path may be extended through it.
+    // Any filter makes the value DERIVED, and a derived value is not an alias.
     //
-    // Liquid ships 87 filters and nearly all make a NEW value, so "derived" is
-    // the default: once derived, a read says nothing about the source.
+    // `{% assign rows = specs | split: '|' %}` turns a string into a list, so a
+    // read of `rows[0].k` says nothing about `specs` having members. The source
+    // is still recorded — that is the real dependency — only the paths beneath
+    // it are dropped.
     //
-    // Two exceptions earn their place and the lists are deliberately SHORT.
-    // Wrongly calling a filter shape-preserving INVENTS a required key — the
-    // failure that reads as "your document is broken" about one that is fine.
-    // Wrongly omitting one merely drops a key from the contract, which surfaces
-    // as weak evidence in `unused`. So anything uncertain is left out: `concat`
-    // and `slice` change element type with the operand, and `sample` returns one
-    // item or several depending on its argument.
-    const SHAPE_PRESERVING = new Set([
-        'sort', 'sort_natural', 'reverse', 'uniq', 'compact',
-        'where', 'where_exp', 'reject', 'reject_exp',
-        'push', 'unshift', 'default',
-    ])
-    // Yields ONE element of the collection, so the alias is `source[]`.
-    const ELEMENT_OF = new Set(['first', 'last', 'find', 'find_exp'])
+    // Deliberately blunt. Classifying all 87 of liquid's filters by what they do
+    // to a value's shape was tried and removed: it is a table that has to track
+    // an engine's evolution, it is wrong in the direction that INVENTS required
+    // keys, and it exists per engine. What it bought was a few extra paths in a
+    // list that is now advisory, which is not worth the fragility. Being
+    // conservative here costs an occasional missing entry in a weak list;
+    // being clever cost a working page being reported as broken, twice.
+    const isDerived = (value) => !!(value?.filters ?? []).length
 
-    // Filter names out of raw tag text, for the tags whose parsed form drops
-    // them. Quoted segments come out first: liquid's own `split: '|'` would
-    // otherwise read as a pipe introducing a filter called nothing.
-    const filtersInText = (text) => {
-        const bare = String(text ?? '').replace(/'[^']*'|"[^"]*"/g, "''")
-        return [...bare.matchAll(/\|\s*([a-zA-Z_]\w*)/g)].map(m => m[1])
-    }
-
-    // A chain is only as safe as its least safe link.
-    const shapeAfter = (names) => {
-        let element = false
-        for (const name of names) {
-            if (ELEMENT_OF.has(name)) { element = true; continue }
-            if (SHAPE_PRESERVING.has(name)) continue
-            return 'derived'
-        }
-        return element ? 'element' : 'same'
-    }
-    // Keyed by partial name and MERGED across call sites: `ui/btn` rendered
-    // eight times with different labels is one partial with the union of what
-    // it is ever passed, which is the question a contract answers.
+    // Keyed by partial name and MERGED across call sites: one partial rendered
+    // eight times with different labels is one entry holding the union of what
+    // it is ever passed.
     const partials   = new Map()
     const iterations = []
     const assigns    = []
+
 
     // The path a tag ARGUMENT refers to, or null if it is a literal.
     //
@@ -318,16 +296,6 @@ export function parseReferences(source) {
                         // r.more %}` makes this template depend on `r.more`,
                         // and nothing recorded that — so a contract built from
                         // one file could not see a key consumed one file down.
-                        // Whether a given argument carries a fallback filter,
-                        // read from the RAW tag text: liquidjs parses a hash
-                        // value down to a bare path token and drops the filter
-                        // from the structured form, so there is nothing else to
-                        // look at. Best-effort by necessity, and wrong only in
-                        // the direction of calling something optional.
-                        const rawArgs = String(node.token?.args ?? node.token?.content ?? '')
-                        const argHasFallback = (name) => new RegExp(
-                            `\\b${name}\\s*:\\s*[A-Za-z_$][\\w$.]*\\s*\\|\\s*(?:${[...FALLBACK_FILTERS].join('|')})\\b`,
-                        ).test(rawArgs)
                         for (const [name, token] of Object.entries(node.hash?.hash ?? {})) {
                             const path = pathOfToken(token)
                             if (!path) continue
@@ -335,7 +303,7 @@ export function parseReferences(source) {
                             // before the partial ever runs — so a partial
                             // rendered inside a loop reports what the loop
                             // hands it, not the loop variable's local name.
-                            entry.args[name] = record(path, scope, guarded || argHasFallback(name))
+                            entry.args[name] = record(path, scope, guarded)
                         }
                         // `{% render 'x' with item as t %}` — the same binding
                         // written positionally.
@@ -367,12 +335,9 @@ export function parseReferences(source) {
                         // dependency. `derived` travels with the assign because
                         // the closure walker applies these as bindings too and
                         // has no other way to know.
-                        const shape = shapeAfter((node.value?.filters ?? []).map(f => f.name))
-                        const derived = shape === 'derived'
-                        const bound = shape === 'element' ? `${from}[]` : from
-                        assigns.push({ key: node.key, from: derived ? from : bound,
-                                       ...(derived ? { derived } : {}) })
-                        if (from && !derived) scope[node.key] = bound
+                        const derived = isDerived(node.value)
+                        assigns.push({ key: node.key, from, ...(derived ? { derived } : {}) })
+                        if (from && !derived) scope[node.key] = from
                     }
                     break
                 }
@@ -388,14 +353,15 @@ export function parseReferences(source) {
                         iterations.push({ item, collection })
                         const path = extractPath(collection)
                         const resolved = path ? record(path, scope, guarded) : null
-                        // The collection may be filtered, and liquidjs parses it
-                        // down to a bare path token — the filters survive only in
-                        // the raw tag text. `{% for t in c.tags | split: '|' %}`
-                        // iterates a list made FROM a string, so binding the item
-                        // to `c.tags[]` would invent a member of a string.
-                        const shape = shapeAfter(filtersInText(node.token?.args ?? node.token?.content))
-                        if (resolved && node.variable && shape !== 'derived') {
-                            inner[node.variable] = shape === 'element' ? resolved : `${resolved}[]`
+                        // A filtered collection is derived for the same reason.
+                        // liquidjs parses it down to a bare path token, so the
+                        // pipe is looked for in the raw tag text — with quoted
+                        // segments removed first, since liquid's own
+                        // `split: '|'` would otherwise read as one.
+                        const raw = String(node.token?.args ?? node.token?.content ?? '')
+                            .replace(/'[^']*'|"[^"]*"/g, "''")
+                        if (resolved && node.variable && !raw.includes('|')) {
+                            inner[node.variable] = `${resolved}[]`
                         }
                     }
                     if (Array.isArray(node.templates))     walk(node.templates, inner, guarded)
