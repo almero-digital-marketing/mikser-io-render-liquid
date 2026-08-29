@@ -122,17 +122,26 @@ export async function render({ entity, runtime, state, track }) {
 const LIQUID_IDENT_PATH = /([a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)*)/
 export function parseReferences(source) {
     if (typeof source !== 'string' || !source) {
-        return { variables: [], partials: [], iterations: [], assigns: [] }
+        return { variables: [], partials: [], iterations: [], assigns: [], optional: [] }
     }
     const probe = new Liquid({})
     let templates
     try {
         templates = probe.parse(source)
     } catch (err) {
-        return { variables: [], partials: [], iterations: [], assigns: [], parseError: err.message }
+        return { variables: [], partials: [], iterations: [], assigns: [], optional: [], parseError: err.message }
     }
 
     const variables  = new Set()
+    // Paths a template only reads behind a guard. `{% if meta.backdrop %}` and
+    // everything inside that branch is OPTIONAL by construction — the layout
+    // was written to work without it — so reporting such a key as missing from
+    // a document says "probably wrong" about something that is fine.
+    const optional   = new Set()
+    // Liquid resolves these on any array or string rather than looking them up
+    // on the data: `{% if tags.size > 0 %}` asks how many, not for a key called
+    // `size`. Recording them puts engine machinery into a document's contract.
+    const LIQUID_PSEUDO = new Set(['size', 'first', 'last'])
     // Keyed by partial name and MERGED across call sites: `ui/btn` rendered
     // eight times with different labels is one partial with the union of what
     // it is ever passed, which is the question a contract answers.
@@ -199,13 +208,22 @@ export function parseReferences(source) {
         return base ? [base, ...rest].join('.') : path
     }
 
-    const record = (path, scope) => {
-        const resolved = deref(path, scope)
-        if (resolved) variables.add(resolved)
+    const record = (path, scope, guarded = false) => {
+        let resolved = deref(path, scope)
+        if (!resolved) return resolved
+        // Trim a trailing pseudo-property: `hero.tags.size` is a question about
+        // `hero.tags`, not a key of its own.
+        const parts = resolved.split('.')
+        if (parts.length > 1 && LIQUID_PSEUDO.has(parts[parts.length - 1])) {
+            parts.pop()
+            resolved = parts.join('.')
+        }
+        variables.add(resolved)
+        if (guarded) optional.add(resolved)
         return resolved
     }
 
-    function walk(nodes, scope = {}) {
+    function walk(nodes, scope = {}, guarded = false) {
         if (!Array.isArray(nodes)) return
         for (const node of nodes) {
             const kind = node?.constructor?.name
@@ -216,7 +234,7 @@ export function parseReferences(source) {
                     // variable ref.
                     const content = node.token?.content ?? ''
                     const path = extractPath(content)
-                    if (path) record(path, scope)
+                    if (path) record(path, scope, guarded)
                     break
                 }
                 case 'IncludeTag':
@@ -224,7 +242,21 @@ export function parseReferences(source) {
                 case 'LayoutTag': {
                     const file = getText(node.file)
                     if (file) {
-                        const entry = partials.get(file) ?? { name: file, args: {}, aliases: [] }
+                        // `include` shares the CALLER's scope; `render` does
+                        // not. Liquid draws that line deliberately, and a
+                        // contract that ignores it resolves nothing inside an
+                        // included partial: the section registry reads
+                        // `section`, which only means anything because the
+                        // `for` loop that included it is still in view.
+                        const inherits = kind !== 'RenderTag'
+                        const entry = partials.get(file) ?? { name: file, args: {}, aliases: [], inherits, scope: {} }
+                        // The scope an inherited partial was included IN, which
+                        // only the parser can see. `{% include 'sections/_registry' %}`
+                        // inside `{% for section in meta.sections %}` reads
+                        // `section`, and that name means nothing without the
+                        // loop it came from. Merged across call sites, because a
+                        // partial included twice is one contract.
+                        if (inherits) Object.assign(entry.scope, scope)
                         // The arguments a partial is called WITH. Dropping
                         // these was the hole: `{% render 'ui/btn', label:
                         // r.more %}` makes this template depend on `r.more`,
@@ -237,18 +269,18 @@ export function parseReferences(source) {
                             // before the partial ever runs — so a partial
                             // rendered inside a loop reports what the loop
                             // hands it, not the loop variable's local name.
-                            entry.args[name] = record(path, scope)
+                            entry.args[name] = record(path, scope, guarded)
                         }
                         // `{% render 'x' with item as t %}` — the same binding
                         // written positionally.
                         const withPath = node.with ? pathOfToken(node.with.value) : null
                         if (withPath) {
-                            entry.aliases.push({ from: record(withPath, scope), to: node.with.alias ?? null })
+                            entry.aliases.push({ from: record(withPath, scope, guarded), to: node.with.alias ?? null })
                         }
                         partials.set(file, entry)
                     }
                     // Render/include accept a body in some dialects; walk it.
-                    if (Array.isArray(node.templates)) walk(node.templates, scope)
+                    if (Array.isArray(node.templates)) walk(node.templates, scope, guarded)
                     break
                 }
                 case 'AssignTag': {
@@ -259,7 +291,7 @@ export function parseReferences(source) {
                     const found = new Set()
                     collectValuePaths(node.value, found)
                     const raw = [...found][0] ?? null
-                    const from = raw ? record(raw, scope) : null
+                    const from = raw ? record(raw, scope, guarded) : null
                     if (node.key) {
                         assigns.push({ key: node.key, from })
                         // Bound for the REST of this template, which is what
@@ -279,11 +311,11 @@ export function parseReferences(source) {
                         const item = node.variable ?? '(for)'
                         iterations.push({ item, collection })
                         const path = extractPath(collection)
-                        const resolved = path ? record(path, scope) : null
+                        const resolved = path ? record(path, scope, guarded) : null
                         if (resolved && node.variable) inner[node.variable] = `${resolved}[]`
                     }
-                    if (Array.isArray(node.templates))     walk(node.templates, inner)
-                    if (Array.isArray(node.elseTemplates)) walk(node.elseTemplates, inner)
+                    if (Array.isArray(node.templates))     walk(node.templates, inner, guarded)
+                    if (Array.isArray(node.elseTemplates)) walk(node.elseTemplates, inner, guarded)
                     break
                 }
                 case 'IfTag':
@@ -293,21 +325,38 @@ export function parseReferences(source) {
                     // Branch condition is a LiquidJS Value whose `.initial.postfix[]`
                     // expresses identifier paths; walk them rather than relying on
                     // string forms that aren't reliably exposed.
+                    // A `case` dispatches on a value the document supplies and
+                    // its branches are alternatives, not guards; `if`/`unless`
+                    // are what make the content inside them optional.
+                    const guards = kind !== 'CaseTag'
+                    // A `case` reads its SUBJECT unconditionally — that is the
+                    // value the document supplies to choose a branch. The
+                    // branches hold the `when` literals, which depend on
+                    // nothing, so reading only those recorded the dispatch as
+                    // consuming no keys at all.
+                    if (kind === 'CaseTag' && node.value) {
+                        const subject = new Set()
+                        collectValuePaths(node.value, subject)
+                        for (const f of subject) record(f, scope)
+                    }
                     if (Array.isArray(node.branches)) {
                         for (const branch of node.branches) {
                             const found = new Set()
                             collectValuePaths(branch.value, found)
-                            for (const f of found) record(f, scope)
-                            if (Array.isArray(branch.templates)) walk(branch.templates, scope)
+                            // The condition itself is read unconditionally —
+                            // the template always asks — but a document is not
+                            // wrong for answering no.
+                            for (const f of found) record(f, scope, guards)
+                            if (Array.isArray(branch.templates)) walk(branch.templates, scope, guarded || guards)
                         }
                     }
-                    if (Array.isArray(node.elseTemplates)) walk(node.elseTemplates, scope)
+                    if (Array.isArray(node.elseTemplates)) walk(node.elseTemplates, scope, guarded || guards)
                     break
                 }
                 default: {
                     // Generic walk — many tags expose nested .templates.
-                    if (Array.isArray(node?.templates))     walk(node.templates, scope)
-                    if (Array.isArray(node?.elseTemplates)) walk(node.elseTemplates, scope)
+                    if (Array.isArray(node?.templates))     walk(node.templates, scope, guarded)
+                    if (Array.isArray(node?.elseTemplates)) walk(node.elseTemplates, scope, guarded)
                     break
                 }
             }
@@ -321,6 +370,10 @@ export function parseReferences(source) {
         partials:   Array.from(partials.values()).sort((a, b) => a.name.localeCompare(b.name)),
         iterations,
         assigns,
+        // Read only behind a guard. Reported apart rather than dropped: a
+        // consumer deciding whether a document is WRONG needs these excluded,
+        // and a consumer asking what a layout can use needs them present.
+        optional:   Array.from(optional).sort(),
     }
 }
 

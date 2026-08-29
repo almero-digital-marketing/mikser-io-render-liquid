@@ -56,7 +56,10 @@ describe('liquid parseReferences: partial arguments', () => {
 
     it('reports a plain include with no arguments', () => {
         const r = parseReferences("{% include 'chrome/nav' %}")
-        assert.deepEqual(r.partials, [{ name: 'chrome/nav', args: {}, aliases: [] }])
+        // `inherits` records that liquid's include shares the caller's scope,
+        // and `scope` carries what was in view at the call site.
+        assert.deepEqual(r.partials,
+            [{ name: 'chrome/nav', args: {}, aliases: [], inherits: true, scope: {} }])
     })
 })
 
