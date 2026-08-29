@@ -319,10 +319,23 @@ export function parseReferences(source) {
                     const raw = [...found][0] ?? null
                     const from = raw ? record(raw, scope, guarded) : null
                     if (node.key) {
-                        assigns.push({ key: node.key, from })
+                        // `derived` travels with it: the closure walker applies
+                        // these assigns as bindings too, and it has no other way
+                        // to know the value went through a filter.
+                        const derived = !!(node.value?.filters ?? []).length
+                        assigns.push({ key: node.key, from, ...(derived ? { derived } : {}) })
                         // Bound for the REST of this template, which is what
                         // `assign` means — everything after it sees the alias.
-                        if (from) scope[node.key] = from
+                        //
+                        // NOT bound when the value passed through a filter: the
+                        // result is DERIVED, so a read on it says nothing about
+                        // the source. `{% assign rows = c.specs | split: '|' %}`
+                        // turns a string into a list, and binding it would let a
+                        // loop over `rows` report `specs[]` — a key the document
+                        // does not have and cannot be given, since specs is the
+                        // string being split. The source itself is still
+                        // recorded above, which is the true dependency.
+                        if (from && !derived) scope[node.key] = from
                     }
                     break
                 }

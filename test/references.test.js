@@ -213,3 +213,47 @@ describe('liquid parseReferences: default: as a guard', () => {
             `optional: ${r.optional.join(', ')}`)
     })
 })
+
+// A filtered value is DERIVED, not an alias.
+//
+// `{% assign rows = c.specs | split: '|' %}` turns a string into a list, so a
+// read of `rows[0]` says nothing about `specs` having members. Treating it as an
+// alias reports `specs[]` as a required key of a document whose `specs` IS the
+// string being split — a key no document can ever satisfy, on a page that
+// renders correctly.
+describe('liquid parseReferences: derived values are not aliases', () => {
+    it('records the source but does not extend paths under it', () => {
+        const r = parseReferences(
+            "{% assign rows = data.meta.specs | split: '|' %}"
+            + '{% for row in rows %}{{ row.name }}{% endfor %}')
+        assert.ok(r.variables.includes('data.meta.specs'), 'the real dependency is still recorded')
+        assert.ok(!r.variables.some(v => v.startsWith('data.meta.specs[')),
+            `fabricated a member of a string: ${r.variables.join(', ')}`)
+    })
+
+    it('marks the assign derived so a closure walker knows too', () => {
+        // The walker applies these as bindings as well, and has no other way to
+        // know the value went through a filter.
+        const r = parseReferences("{% assign rows = data.meta.specs | split: '|' %}")
+        assert.equal(r.assigns.find(a => a.key === 'rows')?.derived, true)
+    })
+
+    it('leaves an UNFILTERED alias working', () => {
+        const r = parseReferences('{% assign hero = data.meta.hero %}{{ hero.title }}')
+        assert.ok(r.variables.includes('data.meta.hero.title'))
+        assert.ok(!r.assigns.find(a => a.key === 'hero')?.derived)
+    })
+
+    it('handles the real shape: split, loop, split again', () => {
+        // Verbatim from the project that surfaced this.
+        const r = parseReferences(
+            "{% assign rows = data.meta.results.cases | split: '|' %}"
+            + '{% for row in rows %}'
+            + "{% assign kv = row | split: ':' %}"
+            + '<dt>{{ kv[0] }}</dt>'
+            + '{% endfor %}')
+        assert.ok(r.variables.includes('data.meta.results.cases'))
+        assert.ok(!r.variables.some(v => /results\.cases\[/.test(v)),
+            `fabricated: ${r.variables.filter(v => v.includes('cases')).join(', ')}`)
+    })
+})
