@@ -142,6 +142,12 @@ export function parseReferences(source) {
     // on the data: `{% if tags.size > 0 %}` asks how many, not for a key called
     // `size`. Recording them puts engine machinery into a document's contract.
     const LIQUID_PSEUDO = new Set(['size', 'first', 'last'])
+    // A filter that supplies a fallback is a guard, exactly as `{% if %}` is:
+    // `{{ hero.title | default: meta.title }}` renders correctly for a document
+    // that omits hero.title, so calling it required would report a working page
+    // as wrong.
+    const FALLBACK_FILTERS = new Set(['default'])
+    const hasFallback = (value) => (value?.filters ?? []).some(f => FALLBACK_FILTERS.has(f.name))
     // Keyed by partial name and MERGED across call sites: `ui/btn` rendered
     // eight times with different labels is one partial with the union of what
     // it is ever passed, which is the question a contract answers.
@@ -234,7 +240,17 @@ export function parseReferences(source) {
                     // variable ref.
                     const content = node.token?.content ?? ''
                     const path = extractPath(content)
-                    if (path) record(path, scope, guarded)
+                    if (path) record(path, scope, guarded || hasFallback(node.value))
+                    // A filter's ARGUMENTS are read too. `{{ a | default: b }}`
+                    // reads b, and unconditionally — it is the fallback, so it
+                    // is what renders when a is absent. Leaving it unrecorded
+                    // made it look like a key nothing consumes.
+                    for (const filter of node.value?.filters ?? []) {
+                        for (const arg of filter.args ?? []) {
+                            const argPath = pathOfToken(arg)
+                            if (argPath) record(argPath, scope, guarded)
+                        }
+                    }
                     break
                 }
                 case 'IncludeTag':
@@ -262,6 +278,16 @@ export function parseReferences(source) {
                         // r.more %}` makes this template depend on `r.more`,
                         // and nothing recorded that — so a contract built from
                         // one file could not see a key consumed one file down.
+                        // Whether a given argument carries a fallback filter,
+                        // read from the RAW tag text: liquidjs parses a hash
+                        // value down to a bare path token and drops the filter
+                        // from the structured form, so there is nothing else to
+                        // look at. Best-effort by necessity, and wrong only in
+                        // the direction of calling something optional.
+                        const rawArgs = String(node.token?.args ?? node.token?.content ?? '')
+                        const argHasFallback = (name) => new RegExp(
+                            `\\b${name}\\s*:\\s*[A-Za-z_$][\\w$.]*\\s*\\|\\s*(?:${[...FALLBACK_FILTERS].join('|')})\\b`,
+                        ).test(rawArgs)
                         for (const [name, token] of Object.entries(node.hash?.hash ?? {})) {
                             const path = pathOfToken(token)
                             if (!path) continue
@@ -269,7 +295,7 @@ export function parseReferences(source) {
                             // before the partial ever runs — so a partial
                             // rendered inside a loop reports what the loop
                             // hands it, not the loop variable's local name.
-                            entry.args[name] = record(path, scope, guarded)
+                            entry.args[name] = record(path, scope, guarded || argHasFallback(name))
                         }
                         // `{% render 'x' with item as t %}` — the same binding
                         // written positionally.

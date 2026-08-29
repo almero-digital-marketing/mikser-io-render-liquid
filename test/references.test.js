@@ -161,3 +161,55 @@ describe('liquid parseReferences: aliases through nesting', () => {
         assert.ok(r.variables.includes('data.meta.hero.tagRows'))
     })
 })
+
+// A fallback filter is a guard.
+//
+// `{{ hero.title | default: meta.title }}` renders correctly for a document
+// that omits hero.title — the layout was written to work without it, exactly as
+// with `{% if %}`. Calling it required reports a working page as wrong, and
+// `missing` is the one list that must only ever mean "probably wrong".
+describe('liquid parseReferences: default: as a guard', () => {
+    it('marks a defaulted output as optional', () => {
+        const r = parseReferences('{{ data.meta.hero.title | default: data.meta.title }}')
+        assert.ok(r.optional.includes('data.meta.hero.title'),
+            `optional: ${r.optional.join(', ')}`)
+    })
+
+    it('still records it as consumed — optional is not unread', () => {
+        const r = parseReferences('{{ data.meta.hero.title | default: data.meta.title }}')
+        assert.ok(r.variables.includes('data.meta.hero.title'))
+        // The fallback's own source is read too, and unconditionally.
+        assert.ok(r.variables.includes('data.meta.title'))
+        assert.ok(!r.optional.includes('data.meta.title'))
+    })
+
+    it('leaves an undefaulted sibling required', () => {
+        const r = parseReferences(
+            '{{ data.meta.hero.title | default: data.meta.title }}{{ data.meta.hero.subtitle }}')
+        assert.ok(r.optional.includes('data.meta.hero.title'))
+        assert.ok(!r.optional.includes('data.meta.hero.subtitle'))
+    })
+
+    it('does not treat an ordinary filter as a guard', () => {
+        const r = parseReferences('{{ data.meta.hero.title | upcase }}')
+        assert.deepEqual(r.optional, [])
+    })
+
+    it('marks a defaulted PARTIAL ARGUMENT as optional', () => {
+        // liquidjs parses a hash value down to a bare path token and drops the
+        // filter, so this is read from the raw tag text — the only place it
+        // survives.
+        const r = parseReferences(
+            "{% render 'ui/tag', label: data.meta.after | default: 'x', other: data.meta.plain %}")
+        assert.ok(r.optional.includes('data.meta.after'), `optional: ${r.optional.join(', ')}`)
+        assert.ok(!r.optional.includes('data.meta.plain'), 'an undefaulted argument stays required')
+    })
+
+    it('resolves the defaulted argument through scope, like any other', () => {
+        const r = parseReferences(
+            '{% assign r = data.meta.results %}'
+            + "{% render 'ui/tag', label: r.afterLabel | default: 'x' %}")
+        assert.ok(r.optional.includes('data.meta.results.afterLabel'),
+            `optional: ${r.optional.join(', ')}`)
+    })
+})
