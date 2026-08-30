@@ -1,7 +1,7 @@
 {
   "name": "mikser-io-render-liquid",
-  "version": "5.0.0",
-  "description": "",
+  "version": "5.0.1",
+  "description": "LiquidJS renderer for Mikser. Renders entities whose layout uses the `.liquid` template engine.",
   "main": "index.js",
   "type": "module",
   "scripts": {
