@@ -73,9 +73,29 @@ export async function render({ entity, runtime, state, track }) {
     // Expose every function on runtime as a Liquid filter, so render-
     // helper plugins (markdown, href, ...) keep working without per-
     // plugin glue.
+    //
+    // The filter body resolves the runtime from the per-render CONTEXT rather
+    // than closing over this render's. `engine` is module-level and
+    // registerFilter is a global mutation, so a closure means the last render
+    // to register owns the binding for every render still in flight — and
+    // renders are concurrent, and any `{% render %}` / `{% include %}` is an
+    // await point that guarantees the overlap.
+    //
+    // What that produced: a page resolved `asset` against a DIFFERENT page's
+    // entity, so the relative url was computed from someone else's depth. It
+    // is well-formed and points at nothing, the build is green, and the value
+    // changes between builds because it follows render order. Every
+    // entity-dependent helper was affected the same way, not just asset —
+    // href and resource compute from entity.destination too.
     for (let key in runtime) {
         if (typeof runtime[key] === 'function') {
-            engine.registerFilter(key, (input, ...args) => runtime[key](input, ...args))
+            engine.registerFilter(key, (input, ...args) => {
+                // Falls back to the captured runtime only for a call with no
+                // context — runtime.liquid is public and can be invoked
+                // outside a render.
+                const active = renderContext.getStore()?.runtime ?? runtime
+                return active[key](input, ...args)
+            })
         }
     }
     const source = entity.layout.content ?? ''
@@ -86,7 +106,7 @@ export async function render({ entity, runtime, state, track }) {
         // the async chain and reports the resolved name to the
         // engine's track via the wrapped methods above.
         return await renderContext.run(
-            { track, layouts },
+            { track, layouts, runtime },
             () => runtime.liquid(source, runtime),
         )
     } catch (err) {
