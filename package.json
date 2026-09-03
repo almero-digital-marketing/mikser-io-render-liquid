@@ -1,6 +1,6 @@
 {
   "name": "mikser-io-render-liquid",
-  "version": "5.0.2",
+  "version": "6.0.0",
   "description": "LiquidJS renderer for Mikser. Renders entities whose layout uses the `.liquid` template engine.",
   "main": "index.js",
   "type": "module",
@@ -18,7 +18,7 @@
   },
   "homepage": "https://github.com/almero-digital-marketing/mikser-io-render-liquid#readme",
   "peerDependencies": {
-    "mikser-io": "^9.0.0"
+    "mikser-io": "^10.0.0"
   },
   "dependencies": {
     "liquidjs": "^10.27.0"
