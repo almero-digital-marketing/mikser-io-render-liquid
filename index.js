@@ -449,5 +449,5 @@ export function parseReferences(source) {
 
 // v9 factory — ADR-0010.
 export function renderLiquid(options = {}) {
-    return { name: options.name ?? 'liquid', options, load, render, parseReferences }
+    return { name: options.name ?? 'liquid', options, load, render, parseReferences, module: import.meta.url }
 }
